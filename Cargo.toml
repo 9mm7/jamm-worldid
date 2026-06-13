@@ -1,0 +1,16 @@
+[package]
+name = "worldid"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "World ID 4.0 RP-signature + proof-verification helpers for Jàmm (sybil-resistant voting). Standalone; no Jàmm core deps."
+
+[dependencies]
+tiny-keccak = { version = "2", features = ["keccak"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+rand = "0.8"
+
+[dev-dependencies]
+serde_json = "1"
