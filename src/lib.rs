@@ -8,4 +8,7 @@
 
 mod signature;
 
-pub use signature::{compute_rp_signature_message, hash_to_field};
+pub use signature::{
+    compute_rp_signature_message, hash_to_field, sign_request, RpSignature, SignError,
+    DEFAULT_TTL_SECS,
+};
