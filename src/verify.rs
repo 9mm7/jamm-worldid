@@ -52,14 +52,28 @@ pub async fn verify_with_portal(
     idkit_result: &Value,
 ) -> Result<VerifyOutcome, String> {
     let url = format!("{}/{}", base.trim_end_matches('/'), rp_id);
+    // The Portal sits behind a WAF that 403s requests with no `User-Agent`
+    // (reqwest sends none by default), so set one explicitly.
     let resp = reqwest::Client::new()
         .post(&url)
+        .header(
+            reqwest::header::USER_AGENT,
+            concat!("jamm-worldid/", env!("CARGO_PKG_VERSION")),
+        )
         .json(idkit_result)
         .send()
         .await
         .map_err(|e| format!("portal request failed: {e}"))?;
-    let http_ok = resp.status().is_success();
+    let status = resp.status();
+    let http_ok = status.is_success();
     let body: Value = resp.json().await.unwrap_or(Value::Null);
+    // Log the Portal's verdict so a rejection is diagnosable (the body carries
+    // the `code`/`detail`, e.g. invalid_merkle_root, max_verifications_reached).
+    if !http_ok || body.get("success") == Some(&Value::Bool(false)) {
+        log::warn!("World ID Portal verify -> HTTP {status} body={body}");
+    } else {
+        log::info!("World ID Portal verify -> HTTP {status} (accepted)");
+    }
     Ok(classify(http_ok, &body))
 }
 
