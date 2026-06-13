@@ -6,8 +6,10 @@
 //!
 //! Spec: <https://docs.world.org/world-id/idkit/signatures>
 
+mod nullifier;
 mod signature;
 
+pub use nullifier::{extract_nullifier, normalize_nullifier, nullifier_hex, NullifierError};
 pub use signature::{
     compute_rp_signature_message, hash_to_field, sign_request, RpSignature, SignError,
     DEFAULT_TTL_SECS,
