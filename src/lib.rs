@@ -8,9 +8,11 @@
 
 mod nullifier;
 mod signature;
+mod verify;
 
 pub use nullifier::{extract_nullifier, normalize_nullifier, nullifier_hex, NullifierError};
 pub use signature::{
     compute_rp_signature_message, hash_to_field, sign_request, RpSignature, SignError,
     DEFAULT_TTL_SECS,
 };
+pub use verify::{classify, verify_with_portal, VerifyOutcome};
