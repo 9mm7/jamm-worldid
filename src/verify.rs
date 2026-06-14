@@ -47,6 +47,20 @@ pub fn classify(http_ok: bool, response: &Value, proof: &Value) -> VerifyOutcome
     }
 }
 
+/// One process-wide HTTP client with a timeout and the User-Agent the Portal's
+/// WAF requires (it 403s requests with none). Reused across verify calls.
+fn portal_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(concat!("jamm-worldid/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("build portal client")
+    })
+}
+
 /// Forward an IDKit result to the Portal's v4 verify endpoint and classify the
 /// response. `base` is e.g. `https://developer.world.org/api/v4/verify`; the
 /// `rp_id` is appended. **This is the `/v4/verify` call — server-side only.**
@@ -56,14 +70,8 @@ pub async fn verify_with_portal(
     idkit_result: &Value,
 ) -> Result<VerifyOutcome, String> {
     let url = format!("{}/{}", base.trim_end_matches('/'), rp_id);
-    // The Portal sits behind a WAF that 403s requests with no `User-Agent`
-    // (reqwest sends none by default), so set one explicitly.
-    let resp = reqwest::Client::new()
+    let resp = portal_client()
         .post(&url)
-        .header(
-            reqwest::header::USER_AGENT,
-            concat!("jamm-worldid/", env!("CARGO_PKG_VERSION")),
-        )
         .json(idkit_result)
         .send()
         .await
