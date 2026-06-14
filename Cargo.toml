@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 description = "World ID 4.0 RP-signature + proof-verification helpers for Jàmm (sybil-resistant voting). Standalone; no Jàmm core deps."
+repository = "https://github.com/9mm7/jamm-worldid"
+readme = "README.md"
+keywords = ["world-id", "sybil-resistance", "proof-of-personhood", "voting"]
+categories = ["authentication", "cryptography"]
 
 [dependencies]
 tiny-keccak = { version = "2", features = ["keccak"] }
