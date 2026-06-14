@@ -24,6 +24,7 @@ pub enum VerifyOutcome {
 /// from `proof` — the IDKit result we forwarded, which always carries it —
 /// rather than the Portal response, whose success shape is not contractual.
 /// Pure (no I/O).
+#[must_use]
 pub fn classify(http_ok: bool, response: &Value, proof: &Value) -> VerifyOutcome {
     let code = || {
         response
@@ -70,6 +71,10 @@ fn portal_client() -> &'static reqwest::Client {
 /// Forward an IDKit result to the Portal's v4 verify endpoint and classify the
 /// response. `base` is e.g. `https://developer.world.org/api/v4/verify`; the
 /// `rp_id` is appended. **This is the `/v4/verify` call — server-side only.**
+///
+/// # Errors
+/// Returns `Err` with a diagnostic string if the HTTP request to the Portal
+/// fails (network error or the 10s timeout).
 pub async fn verify_with_portal(
     base: &str,
     rp_id: &str,

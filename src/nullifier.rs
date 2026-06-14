@@ -41,6 +41,10 @@ impl std::error::Error for NullifierError {}
 /// Normalize a nullifier to its canonical 32-byte big-endian form, regardless
 /// of `0x` prefix, case, or omitted leading zeros. This is the SINGLE choke
 /// point — store and compare only the output of this function.
+///
+/// # Errors
+/// Returns [`NullifierError`] if `raw` is empty, exceeds 32 bytes, or contains
+/// non-hex characters.
 pub fn normalize_nullifier(raw: &str) -> Result<[u8; 32], NullifierError> {
     let s = raw.trim();
     let s = s
@@ -66,6 +70,7 @@ pub fn normalize_nullifier(raw: &str) -> Result<[u8; 32], NullifierError> {
 
 /// Lowercase hex (no `0x`) of a canonical nullifier — the form persisted and
 /// anchored on the chain.
+#[must_use]
 pub fn nullifier_hex(n: &[u8; 32]) -> String {
     hex::encode(n)
 }
@@ -85,9 +90,20 @@ pub enum NullifierLookup {
 
 const NULLIFIER_KEYS: [&str; 3] = ["nullifier", "nullifier_hash", "session_nullifier"];
 
+/// Max JSON nesting [`collect_canonical`] descends. A real IDKit proof carries
+/// the nullifier at depth ≤3 (`responses[].nullifier`); this cap only stops
+/// pathological/hostile nesting from overflowing the stack. The HTTP path is
+/// already bounded by serde_json's parse-recursion limit, but this crate is
+/// public and could be handed a programmatically-built `Value`.
+const MAX_PROOF_DEPTH: u32 = 32;
+
 /// Recursively collect every *canonical* nullifier under any recognized key,
-/// anywhere in the proof tree (top level, inside `responses[]`, wrappers).
-fn collect_canonical(v: &Value, out: &mut BTreeSet<[u8; 32]>) {
+/// anywhere in the proof tree (top level, inside `responses[]`, wrappers), up
+/// to [`MAX_PROOF_DEPTH`] levels deep.
+fn collect_canonical(v: &Value, depth: u32, out: &mut BTreeSet<[u8; 32]>) {
+    if depth >= MAX_PROOF_DEPTH {
+        return;
+    }
     match v {
         Value::Object(map) => {
             for (k, val) in map {
@@ -96,10 +112,12 @@ fn collect_canonical(v: &Value, out: &mut BTreeSet<[u8; 32]>) {
                         out.insert(n);
                     }
                 }
-                collect_canonical(val, out);
+                collect_canonical(val, depth + 1, out);
             }
         }
-        Value::Array(arr) => arr.iter().for_each(|el| collect_canonical(el, out)),
+        Value::Array(arr) => arr
+            .iter()
+            .for_each(|el| collect_canonical(el, depth + 1, out)),
         _ => {}
     }
 }
@@ -110,9 +128,10 @@ fn collect_canonical(v: &Value, out: &mut BTreeSet<[u8; 32]>) {
 /// `responses[].nullifier`) must NOT win over the real one. We collect every
 /// recognized nullifier and require them to collapse to a single canonical
 /// value; a second distinct value ⇒ [`NullifierLookup::Conflict`] (rejected).
+#[must_use]
 pub fn locate_nullifier(proof: &Value) -> NullifierLookup {
     let mut set = BTreeSet::new();
-    collect_canonical(proof, &mut set);
+    collect_canonical(proof, 0, &mut set);
     let mut it = set.into_iter();
     match (it.next(), it.next()) {
         (None, _) => NullifierLookup::Absent,
@@ -211,6 +230,21 @@ mod tests {
         assert_eq!(
             locate_nullifier(&p),
             NullifierLookup::Found(normalize_nullifier("dead").unwrap())
+        );
+    }
+    #[test]
+    fn locate_caps_recursion_on_pathological_nesting() {
+        // A nullifier buried far deeper than any real proof is ignored (the depth
+        // cap prevents unbounded recursion); a shallow one is still found. The
+        // Portal would never 2xx a proof hiding its nullifier this deep anyway.
+        let mut deep = json!({ "nullifier": "0xdead" });
+        for _ in 0..80 {
+            deep = json!({ "wrap": deep });
+        }
+        assert_eq!(locate_nullifier(&deep), NullifierLookup::Absent);
+        assert_eq!(
+            locate_nullifier(&json!({ "responses": [{ "nullifier": "0xbeef" }] })),
+            NullifierLookup::Found(normalize_nullifier("beef").unwrap())
         );
     }
 }

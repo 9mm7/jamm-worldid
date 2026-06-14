@@ -55,6 +55,7 @@ fn keccak256(input: &[u8]) -> [u8; 32] {
 ///
 /// `>> 8` on a 256-bit big-endian number drops the least-significant byte and
 /// shifts everything one byte to the right, i.e. `[0x00, h[0], …, h[30]]`.
+#[must_use]
 pub fn hash_to_field(input: &[u8]) -> [u8; 32] {
     let h = keccak256(input);
     let mut out = [0u8; 32];
@@ -66,6 +67,7 @@ pub fn hash_to_field(input: &[u8]) -> [u8; 32] {
 /// Build the canonical pre-image signed by the RP:
 /// `version(0x01) ‖ nonce(32) ‖ created_at(8 BE) ‖ expires_at(8 BE) ‖ [action_hash(32)]`.
 /// 49 bytes without an action, 81 with.
+#[must_use]
 pub fn compute_rp_signature_message(
     nonce: &[u8; 32],
     created_at: u64,
@@ -130,6 +132,11 @@ fn sign_with(
 /// for a uniqueness proof, or `None` for a plain session proof. Generates a
 /// fresh random nonce and uses the system clock; `ttl` defaults to
 /// [`DEFAULT_TTL_SECS`] when `None`.
+///
+/// # Errors
+/// Returns [`SignError::BadKey`] if `signing_key_hex` is not a valid 32-byte
+/// secp256k1 key, or [`SignError::Clock`] if the system clock predates the Unix
+/// epoch.
 pub fn sign_request(
     signing_key_hex: &str,
     action: Option<&str>,
@@ -142,7 +149,8 @@ pub fn sign_request(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| SignError::Clock)?
         .as_secs();
-    let expires_at = created_at + ttl.unwrap_or(DEFAULT_TTL_SECS);
+    // saturating: a pathological `ttl` must not overflow-panic (pub API).
+    let expires_at = created_at.saturating_add(ttl.unwrap_or(DEFAULT_TTL_SECS));
     Ok(sign_with(&key, action, &random, created_at, expires_at))
 }
 
@@ -291,5 +299,13 @@ mod tests {
         assert!(out.sig.starts_with("0x") && out.sig.len() == 2 + 130); // 65 bytes
         assert!(out.nonce.starts_with("0x") && out.nonce.len() == 2 + 64);
         assert_eq!(out.expires_at - out.created_at, 120);
+    }
+
+    #[test]
+    fn sign_request_huge_ttl_saturates_instead_of_overflowing() {
+        // A pathological ttl must not overflow-panic; expires_at saturates at u64::MAX.
+        let out = sign_request(TEST_KEY, None, Some(u64::MAX)).unwrap();
+        assert_eq!(out.expires_at, u64::MAX);
+        assert!(out.expires_at >= out.created_at);
     }
 }
