@@ -5,7 +5,7 @@
 //! Portal proves cryptographic validity; uniqueness is enforced elsewhere
 //! (`nullifier` + `UNIQUE(election_id, nullifier)`).
 
-use crate::nullifier::{extract_nullifier, normalize_nullifier, nullifier_hex};
+use crate::nullifier::nullifier_hex;
 use serde_json::Value;
 
 /// Result of a Portal verify call.
@@ -39,11 +39,17 @@ pub fn classify(http_ok: bool, response: &Value, proof: &Value) -> VerifyOutcome
     if response.get("success") == Some(&Value::Bool(false)) {
         return VerifyOutcome::Rejected { code: code() };
     }
-    match extract_nullifier(proof).and_then(|raw| normalize_nullifier(&raw).ok()) {
-        Some(n) => VerifyOutcome::Verified {
+    use crate::nullifier::{locate_nullifier, NullifierLookup};
+    match locate_nullifier(proof) {
+        NullifierLookup::Found(n) => VerifyOutcome::Verified {
             nullifier_hex: nullifier_hex(&n),
         },
-        None => VerifyOutcome::Malformed,
+        // A second, distinct nullifier in the forwarded proof is a forgery
+        // attempt, not an upstream problem — reject it (400), don't 502.
+        NullifierLookup::Conflict => VerifyOutcome::Rejected {
+            code: "nullifier_conflict".into(),
+        },
+        NullifierLookup::Absent => VerifyOutcome::Malformed,
     }
 }
 
@@ -159,6 +165,18 @@ mod tests {
             classify(true, &resp, &proof),
             VerifyOutcome::Verified {
                 nullifier_hex: format!("{:0>64}", "dead")
+            }
+        );
+    }
+
+    #[test]
+    fn injected_conflicting_nullifier_is_rejected_not_verified() {
+        let resp = json!({ "success": true });
+        let proof = json!({ "nullifier": "0x01", "responses": [{ "nullifier": "0xdead" }] });
+        assert_eq!(
+            classify(true, &resp, &proof),
+            VerifyOutcome::Rejected {
+                code: "nullifier_conflict".into()
             }
         );
     }

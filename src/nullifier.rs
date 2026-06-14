@@ -1,4 +1,4 @@
-//! Nullifier normalization + defensive extraction (the security-critical choke
+//! Nullifier normalization + defensive location (the security-critical choke
 //! point). The Developer Portal proves a proof is cryptographically valid; WE
 //! enforce one-human-one-vote by normalizing the nullifier to a canonical
 //! 32-byte form and persisting it under `UNIQUE(election_id, nullifier)`.
@@ -7,8 +7,14 @@
 //!   1. encoding (mixed case, `0x` prefix, short hex with implied leading zeros)
 //!   2. which response shape carried it (v3 `nullifier_hash`, v4 `nullifier`,
 //!      v4 session `session_nullifier`).
+//!
+//! Because the proof is forwarded by the client, [`locate_nullifier`] collects
+//! EVERY recognized nullifier in the tree and requires them to collapse to one
+//! canonical value — a second distinct value is an injection attempt and is
+//! rejected, never silently preferred over the value the Portal validated.
 
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 /// A nullifier wasn't a normalizable 32-byte hex value.
 #[derive(Debug, PartialEq, Eq)]
@@ -64,43 +70,55 @@ pub fn nullifier_hex(n: &[u8; 32]) -> String {
     hex::encode(n)
 }
 
-/// Defensively pull the nullifier out of a Portal verify response, whichever of
-/// the three shapes arrived. Checks, in order: v4 uniqueness `nullifier`, v3
-/// legacy `nullifier_hash`, v4 session `session_nullifier` — at the top level
-/// and one level down (the uniqueness proof can arrive wrapped). Returns the
-/// raw string (un-normalized); pass it through [`normalize_nullifier`].
-pub fn extract_nullifier(resp: &Value) -> Option<String> {
-    const KEYS: [&str; 3] = ["nullifier", "nullifier_hash", "session_nullifier"];
+/// Where the nullifier search landed in a Portal-accepted proof.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NullifierLookup {
+    /// Exactly one canonical nullifier across every recognized location.
+    Found([u8; 32]),
+    /// No recognized nullifier anywhere.
+    Absent,
+    /// Two or more DISTINCT nullifiers — a forged/ambiguous proof. A genuine
+    /// verification proof carries exactly one; a second distinct value is the
+    /// signature of a `nullifier`-injection attempt and must be rejected.
+    Conflict,
+}
 
-    fn str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
-        v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
-    }
+const NULLIFIER_KEYS: [&str; 3] = ["nullifier", "nullifier_hash", "session_nullifier"];
 
-    // Top level.
-    for k in KEYS {
-        if let Some(s) = str_at(resp, k) {
-            return Some(s.to_string());
-        }
-    }
-    // One level down: common wrappers ("proof", "result", "data") or any object
-    // / first array element carrying one of the keys.
-    if let Some(obj) = resp.as_object() {
-        for (_, v) in obj {
-            let candidate = if v.is_array() {
-                v.as_array().and_then(|a| a.first())
-            } else {
-                Some(v)
-            };
-            if let Some(inner) = candidate {
-                for k in KEYS {
-                    if let Some(s) = str_at(inner, k) {
-                        return Some(s.to_string());
+/// Recursively collect every *canonical* nullifier under any recognized key,
+/// anywhere in the proof tree (top level, inside `responses[]`, wrappers).
+fn collect_canonical(v: &Value, out: &mut BTreeSet<[u8; 32]>) {
+    match v {
+        Value::Object(map) => {
+            for (k, val) in map {
+                if NULLIFIER_KEYS.contains(&k.as_str()) {
+                    if let Some(n) = val.as_str().and_then(|s| normalize_nullifier(s).ok()) {
+                        out.insert(n);
                     }
                 }
+                collect_canonical(val, out);
             }
         }
+        Value::Array(arr) => arr.iter().for_each(|el| collect_canonical(el, out)),
+        _ => {}
     }
-    None
+}
+
+/// Locate THE nullifier in a Portal-accepted proof, defensively. The proof is
+/// the client-forwarded IDKit result, so a value injected at a location the
+/// Portal never validated (e.g. a top-level `nullifier` while the real one is in
+/// `responses[].nullifier`) must NOT win over the real one. We collect every
+/// recognized nullifier and require them to collapse to a single canonical
+/// value; a second distinct value ⇒ [`NullifierLookup::Conflict`] (rejected).
+pub fn locate_nullifier(proof: &Value) -> NullifierLookup {
+    let mut set = BTreeSet::new();
+    collect_canonical(proof, &mut set);
+    let mut it = set.into_iter();
+    match (it.next(), it.next()) {
+        (None, _) => NullifierLookup::Absent,
+        (Some(n), None) => NullifierLookup::Found(n),
+        (Some(_), Some(_)) => NullifierLookup::Conflict,
+    }
 }
 
 #[cfg(test)]
@@ -150,50 +168,49 @@ mod tests {
         );
     }
 
-    // ── extraction: the 3 response shapes ─────────────────────────────────
+    // ── location: collect every nullifier, collapse or reject ─────────────
     #[test]
-    fn extracts_v4_uniqueness_nullifier() {
-        let r = json!({ "success": true, "nullifier": "0xaaaa", "verification_level": "orb" });
-        assert_eq!(extract_nullifier(&r).as_deref(), Some("0xaaaa"));
-    }
-
-    #[test]
-    fn extracts_v3_legacy_nullifier_hash() {
-        let r = json!({ "success": true, "nullifier_hash": "0xbbbb" });
-        assert_eq!(extract_nullifier(&r).as_deref(), Some("0xbbbb"));
-    }
-
-    #[test]
-    fn extracts_v4_session_nullifier() {
-        let r = json!({ "success": true, "session_nullifier": "0xcccc", "session_id": "s-1" });
-        assert_eq!(extract_nullifier(&r).as_deref(), Some("0xcccc"));
-    }
-
-    #[test]
-    fn extracts_from_wrapped_proof_object() {
-        let r = json!({ "success": true, "proof": { "nullifier": "0xdddd" } });
-        assert_eq!(extract_nullifier(&r).as_deref(), Some("0xdddd"));
-    }
-
-    #[test]
-    fn extracts_from_proof_array() {
-        let r = json!({ "proofs": [ { "nullifier": "0xeeee" } ] });
-        assert_eq!(extract_nullifier(&r).as_deref(), Some("0xeeee"));
-    }
-
-    #[test]
-    fn none_when_no_nullifier_present() {
-        let r = json!({ "success": false, "code": "invalid_proof" });
-        assert_eq!(extract_nullifier(&r), None);
-    }
-
-    #[test]
-    fn extracted_then_normalized_is_canonical() {
-        let r = json!({ "nullifier_hash": "0xABC" });
-        let raw = extract_nullifier(&r).unwrap();
+    fn locate_finds_single_nested_responses_nullifier() {
+        let p = json!({ "protocol_version": "4.0", "responses": [{ "nullifier": "0xdead" }] });
         assert_eq!(
-            normalize_nullifier(&raw).unwrap(),
-            normalize_nullifier("abc").unwrap()
+            locate_nullifier(&p),
+            NullifierLookup::Found(normalize_nullifier("0xdead").unwrap())
+        );
+    }
+    #[test]
+    fn locate_finds_top_level_legacy_nullifier_hash() {
+        let p = json!({ "nullifier_hash": "0x01" });
+        assert_eq!(
+            locate_nullifier(&p),
+            NullifierLookup::Found(normalize_nullifier("01").unwrap())
+        );
+    }
+    #[test]
+    fn locate_collapses_same_value_in_two_places() {
+        let p = json!({ "nullifier": "0xdead", "responses": [{ "nullifier": "0x00dead" }] });
+        assert_eq!(
+            locate_nullifier(&p),
+            NullifierLookup::Found(normalize_nullifier("dead").unwrap())
+        );
+    }
+    #[test]
+    fn locate_rejects_injected_conflicting_nullifier() {
+        let p = json!({ "nullifier": "0x01", "responses": [{ "nullifier": "0xdead" }] });
+        assert_eq!(locate_nullifier(&p), NullifierLookup::Conflict);
+    }
+    #[test]
+    fn locate_absent_when_no_nullifier() {
+        assert_eq!(
+            locate_nullifier(&json!({ "success": true })),
+            NullifierLookup::Absent
+        );
+    }
+    #[test]
+    fn locate_ignores_non_hex_value() {
+        let p = json!({ "nullifier": "not-hex", "responses": [{ "nullifier": "0xdead" }] });
+        assert_eq!(
+            locate_nullifier(&p),
+            NullifierLookup::Found(normalize_nullifier("dead").unwrap())
         );
     }
 }
