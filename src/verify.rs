@@ -19,11 +19,15 @@ pub enum VerifyOutcome {
     Malformed,
 }
 
-/// Classify a Portal verify response from its HTTP-2xx-ness + parsed body.
-/// Pure (no I/O) so it can be pinned to the documented response shapes.
-pub fn classify(http_ok: bool, body: &Value) -> VerifyOutcome {
+/// Classify a Portal verify response. `response` is the Portal's parsed body
+/// (used only for the reject `code`); on a clean 2xx the nullifier is taken
+/// from `proof` — the IDKit result we forwarded, which always carries it —
+/// rather than the Portal response, whose success shape is not contractual.
+/// Pure (no I/O).
+pub fn classify(http_ok: bool, response: &Value, proof: &Value) -> VerifyOutcome {
     let code = || {
-        body.get("code")
+        response
+            .get("code")
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string()
@@ -32,10 +36,10 @@ pub fn classify(http_ok: bool, body: &Value) -> VerifyOutcome {
         return VerifyOutcome::Rejected { code: code() };
     }
     // A 2xx with an explicit `success: false` is still a rejection.
-    if body.get("success") == Some(&Value::Bool(false)) {
+    if response.get("success") == Some(&Value::Bool(false)) {
         return VerifyOutcome::Rejected { code: code() };
     }
-    match extract_nullifier(body).and_then(|raw| normalize_nullifier(&raw).ok()) {
+    match extract_nullifier(proof).and_then(|raw| normalize_nullifier(&raw).ok()) {
         Some(n) => VerifyOutcome::Verified {
             nullifier_hex: nullifier_hex(&n),
         },
@@ -74,7 +78,7 @@ pub async fn verify_with_portal(
     } else {
         log::info!("World ID Portal verify -> HTTP {status} (accepted)");
     }
-    Ok(classify(http_ok, &body))
+    Ok(classify(http_ok, &body, idkit_result))
 }
 
 #[cfg(test)]
@@ -83,10 +87,11 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn success_with_nullifier_is_verified_and_canonical() {
-        let b = json!({ "success": true, "nullifier": "0xABC", "verification_level": "orb" });
+    fn success_with_nullifier_in_proof_is_verified_and_canonical() {
+        let resp = json!({ "success": true });
+        let proof = json!({ "nullifier": "0xABC" });
         assert_eq!(
-            classify(true, &b),
+            classify(true, &resp, &proof),
             VerifyOutcome::Verified {
                 nullifier_hex: format!("{:0>64}", "abc")
             }
@@ -94,10 +99,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_nullifier_hash_shape_is_verified() {
-        let b = json!({ "nullifier_hash": "0x01" });
+    fn legacy_nullifier_hash_in_proof_is_verified() {
+        let resp = json!({ "success": true });
+        let proof = json!({ "nullifier_hash": "0x01" });
         assert_eq!(
-            classify(true, &b),
+            classify(true, &resp, &proof),
             VerifyOutcome::Verified {
                 nullifier_hex: format!("{:0>64}", "01")
             }
@@ -106,9 +112,9 @@ mod tests {
 
     #[test]
     fn non_2xx_is_rejected_with_code() {
-        let b = json!({ "code": "invalid_proof", "detail": "…" });
+        let resp = json!({ "code": "invalid_proof", "detail": "…" });
         assert_eq!(
-            classify(false, &b),
+            classify(false, &resp, &json!({})),
             VerifyOutcome::Rejected {
                 code: "invalid_proof".into()
             }
@@ -117,9 +123,9 @@ mod tests {
 
     #[test]
     fn success_false_is_rejected() {
-        let b = json!({ "success": false, "code": "max_verifications_reached" });
+        let resp = json!({ "success": false, "code": "max_verifications_reached" });
         assert_eq!(
-            classify(true, &b),
+            classify(true, &resp, &json!({ "nullifier": "0xabc" })),
             VerifyOutcome::Rejected {
                 code: "max_verifications_reached".into()
             }
@@ -127,8 +133,25 @@ mod tests {
     }
 
     #[test]
-    fn ok_but_no_nullifier_is_malformed() {
-        let b = json!({ "success": true });
-        assert_eq!(classify(true, &b), VerifyOutcome::Malformed);
+    fn ok_but_no_nullifier_in_proof_is_malformed() {
+        let resp = json!({ "success": true });
+        assert_eq!(
+            classify(true, &resp, &json!({ "success": true })),
+            VerifyOutcome::Malformed
+        );
+    }
+
+    #[test]
+    fn nullifier_comes_from_proof_not_response() {
+        // The Portal response echoes NO nullifier; the proof carries it in a
+        // realistic v4 uniqueness shape. Reading the response would be Malformed.
+        let resp = json!({ "success": true });
+        let proof = json!({ "protocol_version": "4.0", "responses": [{ "nullifier": "0xdead" }] });
+        assert_eq!(
+            classify(true, &resp, &proof),
+            VerifyOutcome::Verified {
+                nullifier_hex: format!("{:0>64}", "dead")
+            }
+        );
     }
 }
